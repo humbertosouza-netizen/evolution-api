@@ -1,60 +1,41 @@
+# ---------- Builder ----------
 FROM node:20-alpine AS builder
-
-RUN apk update && \
-    apk add --no-cache git ffmpeg wget curl bash openssl
-
-LABEL version="2.3.1" description="Api to control whatsapp features through http requests." 
-LABEL maintainer="Davidson Gomes" git="https://github.com/DavidsonGomes"
-LABEL contact="contato@evolution-api.com"
-
 WORKDIR /evolution
 
-COPY ./package*.json ./
-COPY ./tsconfig.json ./
-COPY ./tsup.config.ts ./
+# deps para pacotes nativos (se houver)
+RUN apk add --no-cache python3 make g++ bash git openssl tzdata ffmpeg
 
-RUN npm ci --silent
+# habilita o corepack (pnpm)
+RUN corepack enable
 
-COPY ./src ./src
-COPY ./public ./public
-COPY ./prisma ./prisma
-COPY ./manager ./manager
-COPY ./.env.example ./.env
-COPY ./runWithProvider.js ./
+# copie os manifests corretos
+COPY package.json pnpm-lock.yaml ./
+# se houver .npmrc/.pnpmfile.cjs e tsconfig/tsup, copie também
+COPY tsconfig.json tsup.config.ts ./
 
-COPY ./Docker ./Docker
+# instale com lockfile (dev deps incluídas para build)
+RUN pnpm install --frozen-lockfile
 
-RUN chmod +x ./Docker/scripts/* && dos2unix ./Docker/scripts/*
+# agora copie o código
+COPY src ./src
 
-RUN ./Docker/scripts/generate_database.sh
+# build (ajuste o script se for diferente)
+RUN pnpm build
 
-RUN npm run build
+# remova dev deps e mantenha só prod para a imagem final
+RUN pnpm prune --prod
 
-FROM node:20-alpine AS final
+# ---------- Runner ----------
+FROM node:20-alpine AS runner
+WORKDIR /app
+RUN apk add --no-cache tzdata ffmpeg bash openssl
 
-RUN apk update && \
-    apk add tzdata ffmpeg bash openssl
-
-ENV TZ=America/Sao_Paulo
-ENV DOCKER_ENV=true
-
-WORKDIR /evolution
-
-COPY --from=builder /evolution/package.json ./package.json
-COPY --from=builder /evolution/package-lock.json ./package-lock.json
-
+# traga só o necessário
 COPY --from=builder /evolution/node_modules ./node_modules
 COPY --from=builder /evolution/dist ./dist
-COPY --from=builder /evolution/prisma ./prisma
-COPY --from=builder /evolution/manager ./manager
-COPY --from=builder /evolution/public ./public
-COPY --from=builder /evolution/.env ./.env
-COPY --from=builder /evolution/Docker ./Docker
-COPY --from=builder /evolution/runWithProvider.js ./runWithProvider.js
-COPY --from=builder /evolution/tsup.config.ts ./tsup.config.ts
+COPY --from=builder /evolution/package.json ./package.json
 
-ENV DOCKER_ENV=true
-
+ENV NODE_ENV=production
 EXPOSE 8080
-
-ENTRYPOINT ["/bin/bash", "-c", ". ./Docker/scripts/deploy_database.sh && npm run start:prod" ]
+# ajuste se o entrypoint/dist mudar no seu projeto:
+CMD ["node", "dist/index.js"]
